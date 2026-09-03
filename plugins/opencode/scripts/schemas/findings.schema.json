@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/elderengineer/opencode-code-review-cc/schemas/findings.schema.json",
+  "title": "opencode-code-review findings",
+  "description": "The output contract of opencode-code-review's /code-review at medium and above (a JSON array of findings, ranked most-severe first, capped per level, [] when nothing survives verification). The low level's one-line contract (`path:line — text`, or `(none)`) is normalised into this same shape by findings.py: summary carries the line, failure_scenario repeats it, and verdict is absent because low runs no verify pass.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["file", "line", "summary", "failure_scenario"],
+    "properties": {
+      "file": { "type": "string", "minLength": 1, "description": "Repo-relative path of the file the finding is in." },
+      "line": { "type": "integer", "minimum": 0, "description": "1-indexed line the finding anchors to (0 when the model gave none)." },
+      "summary": { "type": "string", "minLength": 1, "description": "One-sentence statement of the defect." },
+      "failure_scenario": { "type": "string", "minLength": 1, "description": "Concrete inputs/state → wrong output/crash, or for cleanups the concrete cost." },
+      "verdict": { "type": "string", "enum": ["CONFIRMED", "PLAUSIBLE"], "description": "Optional: the verify pass's vote, when the model reports it. Phase B (fix) applies CONFIRMED findings and skips PLAUSIBLE ones with a stated reason." },
+      "severity": { "type": "string" },
+      "category": { "type": "string" }
+    },
+    "additionalProperties": true
+  }
+}

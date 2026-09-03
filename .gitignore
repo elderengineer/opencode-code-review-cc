@@ -1,0 +1,16 @@
+# harness scratch in any repo this plugin reviews (ledger, marker, rendered policy, findings)
+.opencode-review/
+
+# editors and OS
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# python bytecode from the scripts
+__pycache__/
+*.pyc
+
+# local Claude Code settings
+.claude/settings.local.json

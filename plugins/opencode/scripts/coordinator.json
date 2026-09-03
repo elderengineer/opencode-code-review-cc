@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "_comment": "The PRIVATE opencode config a sandboxed run loads instead of ~/.config/opencode (XDG_CONFIG_HOME is pointed at a per-run directory holding a rendered copy of this file; OPENCODE_DISABLE_PROJECT_CONFIG=1 keeps the reviewed repo's .opencode/opencode.json out too — measured on opencode 1.18.27, see reference/confinement.md). Exactly one plugin loads: opencode-code-review, which injects /code-review, the code_review_prompt tool and the reviewer-<level> subagents. @PLUGIN@ is substituted by run-review.sh. The two agents below are the harness's own; their tools blocks are the SECOND layer behind srt's kernel boundary — a tool the model cannot call is a step it does not waste.",
+  "plugin": ["@PLUGIN@"],
+  "agent": {
+    "opencode-review-coordinator": {
+      "description": "Sandboxed coordinator for opencode-code-review's /code-review: runs Phase 0 with a read-only shell, spawns the reviewer-<level> subagents through task, and emits the findings the compiled prompt asks for.",
+      "mode": "primary",
+      "temperature": 0.1,
+      "tools": {
+        "*": false,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "bash": true,
+        "task": true,
+        "code_review_prompt": true,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "webfetch": false,
+        "skill": false,
+        "todowrite": false,
+        "todoread": false
+      },
+      "permission": {
+        "edit": "deny",
+        "webfetch": "deny",
+        "bash": "allow",
+        "task": "allow",
+        "external_directory": "deny",
+        "doom_loop": "deny"
+      },
+      "prompt": "You coordinate exactly one code review and nothing else. First call the code_review_prompt tool, passing the user's arguments verbatim (no added quotes), then execute its output exactly and in order — the compiled prompt is your full instruction set for this session.\n\nThe working tree is READ-ONLY at the kernel level, enforced from outside this process: nothing you or a subagent run can change a byte of it, no build, test or install command will work, and the only network is the one carrying this conversation. Do not attempt an edit, do not retry a failed write, do not run a build, and do not report any of that as a finding — it is the design, not a defect. The review target you are given is the exact git range under review; use it as the diff scope rather than guessing an upstream.\n\nYour final message is the deliverable a harness parses: when the compiled prompt asks for a JSON array, end with that array alone (a ```json fence is fine) and no prose after it; when it asks for one-line findings or `(none)`, end with exactly those lines. Never post, comment, apply fixes or pin models — those flags do not exist here."
+    },
+    "opencode-review-preflight": {
+      "description": "Route preflight for run-review.sh: a ~100-token probe of one model before the heavy run. No tools at all.",
+      "mode": "primary",
+      "temperature": 0,
+      "tools": { "*": false },
+      "permission": { "edit": "deny", "bash": "deny", "webfetch": "deny" },
+      "prompt": "Reply with exactly what the message asks for and nothing else. You have no tools."
+    }
+  }
+}

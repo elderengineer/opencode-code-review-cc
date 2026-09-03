@@ -1,0 +1,50 @@
+{
+  "filesystem": {
+    "allowRead": [],
+    "denyRead": [
+      "@HOME@/.ssh",
+      "@HOME@/.aws",
+      "@HOME@/.config/gh",
+      "@HOME@/.netrc",
+      "@HOME@/.gnupg",
+      "@HOME@/.grok",
+      "@HOME@/.npmrc",
+      "@HOME@/.docker/config.json",
+      "@HOME@/.kube"
+    ],
+    "allowWrite": [
+      "@OPENCODE_DATA@",
+      "@OPENCODE_CACHE@",
+      "@SANDBOX_TMP@"
+    ],
+    "denyWrite": [
+      "@ROOT@"
+    ]
+  },
+  "network": {
+    "allowedDomains": [
+      "opencode.ai",
+      "api.deepseek.com",
+      "api.z.ai",
+      "models.opencode.ai"
+    ],
+    "deniedDomains": [],
+    "allowLocalBinding": false,
+    "tlsTerminate": {}
+  },
+  "credentials": {
+    "files": [
+      {
+        "path": "@OPENCODE_DATA@/auth.json",
+        "mode": "mask",
+        "extract": "\"(?:key|access|refresh)\"\\s*:\\s*\"([^\"]+)\"",
+        "onExtractNoMatch": "error",
+        "injectHosts": [
+          "opencode.ai",
+          "api.deepseek.com",
+          "api.z.ai"
+        ]
+      }
+    ]
+  }
+}

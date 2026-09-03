@@ -1,0 +1,11 @@
+{
+  "name": "opencode",
+  "version": "0.1.0",
+  "description": "Run opencode's /code-review from Claude Code inside a bubblewrap sandbox.",
+  "author": {
+    "name": "Alan Ho"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/elderengineer/opencode-code-review-cc",
+  "repository": "https://github.com/elderengineer/opencode-code-review-cc"
+}

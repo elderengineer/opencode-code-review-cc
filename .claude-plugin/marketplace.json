@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "opencode-code-review-cc",
+  "description": "Run opencode's /code-review from Claude Code inside a bubblewrap sandbox.",
+  "owner": {
+    "name": "Alan Ho"
+  },
+  "metadata": {
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "opencode",
+      "description": "Run opencode's /code-review from Claude Code inside a bubblewrap sandbox.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Alan Ho"
+      },
+      "source": "./plugins/opencode",
+      "license": "MIT",
+      "homepage": "https://github.com/elderengineer/opencode-code-review-cc"
+    }
+  ]
+}
