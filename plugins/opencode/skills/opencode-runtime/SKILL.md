@@ -48,6 +48,7 @@ classes, never confused:
   changed while the reviewer ran, another run holds the marker).
 
 Report an abort as an abort. Do not relaunch on your own; `usage` says what the attempts cost.
+Make recovery the default rather than something the user must think to request: the script salvage-promotes a finished review from a dead process on its own, and before reporting an abort, check what else survived — a re-run is the last resort, never the first move.
 
 ## Levels and what they buy
 

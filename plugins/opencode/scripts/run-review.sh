@@ -124,7 +124,7 @@ variant_for() { # <model> <level>
     *) echo "$VARIANT" ;;
   esac
 }
-TIMEOUT_SECS="${OPENCODE_REVIEW_TIMEOUT:-2400}"
+TIMEOUT_SECS="${OPENCODE_REVIEW_TIMEOUT:-3600}"
 MAX_ATTEMPTS="${OPENCODE_REVIEW_MAX_ATTEMPTS:-6}"   # default = the longest ladder, so the advertised tail is reachable
 # Liveness watchdog (see the loop): kill a run whose event log never starts, stops growing, or
 # grows without bound, long before the timeout would. A healthy run wrote 143KB of events in its
