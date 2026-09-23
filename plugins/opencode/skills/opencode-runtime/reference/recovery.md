@@ -6,17 +6,17 @@ is no review.
 
 Two failure classes, and the harness never confuses them:
 
-- **Route/model-shaped → the ladder advances.** A failed preflight (the route refused or went
+- **Route/model-shaped → abort after the one attempt.** A failed preflight (the route refused or went
   silent — nothing heavy was sent, and the ledger gets a `probe` row rather than a `run` one); a
   timeout; non-zero exit with nothing to salvage; a provider error event; no assistant text (a
   runaway — the fix is a different model, never a bigger budget); the model never completed a
   `code_review_prompt` call; the compiled cell is not the requested level (the model altered the
   arguments); no finder subagent was spawned at medium+; a stop reason other than `stop`; output
   off-contract (`findings.py` could not extract a schema-valid findings list).
-- **Confinement/contract-shaped → abort, loudly, non-zero, never advance.** A host requirement is
+- **Confinement/contract-shaped → abort, loudly, non-zero.** A host requirement is
   missing; the policy will not render; **the sandbox probe measured a writable repo, a readable
   credential path, no egress, an unmasked key, or the plugin not loaded**; opencode fell back to
-  the default agent; a `task` spawn named an agent outside `{reviewer-<level>, reviewer-lens-*}`;
+  the default agent; a `task` spawn named an agent outside `{reviewer-<level>, reviewer-<level>-alt<N>, reviewer-lens-*}`;
   the tree changed while the reviewer ran; another run holds the marker; `using <model>` was
   typed.
 
@@ -42,13 +42,13 @@ can never be mistaken for a finished review.
 - **The tree changed.** The abort prints the diff and the exact `mv … && git rev-parse HEAD > …`
   that promotes the kept review by hand. If the edits were yours (another window), it is sound; if
   they were not, the sandbox did not hold and neither the tree nor the review can be trusted.
-- **A pinned model failed.** No fallback ran, by design. Re-run without `--model` to get the level's
-  ladder. If it died at the preflight, the route is the problem: do not relaunch until it is
+- **The coordinator's model failed.** The harness has no ladder; the abort names the model and its
+  source (--model, opencode-code-review's cached ladder head or pin, or opencode's default). Pass
+  `--model <provider/model>` to run the coordinator elsewhere. If it died at the preflight, the route is the problem: do not relaunch until it is
   verified — the preflight verifies it for ~100 tokens.
-- **The whole ladder failed.** The abort lists each attempt with its kept log paths and the total
-  spend. **Read `run-review.sh usage` before re-running** — that is the only place that says what
-  the attempts actually consumed, subagents included. Fix the route first; a fresh run re-bills
-  from the top, times the fan-out.
+- **Before any re-run, read `run-review.sh usage`** — that is the only place that says what the
+  attempt actually consumed, subagents included. Fix the route first; a fresh run re-bills the
+  whole fan-out.
 - **Another run holds the marker.** `run-review.sh status` shows whether it is alive and how long
   ago its event log grew; `run-review.sh cancel` sends it TERM (it records its spend and releases
   the marker). A marker whose process is gone is cleared automatically by the next run.

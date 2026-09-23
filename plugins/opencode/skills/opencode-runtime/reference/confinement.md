@@ -8,7 +8,7 @@ not need it: every requirement here aborts at runtime naming its own fix.
 as `srt -s <rendered policy> -- env … opencode …`, where `srt` is
 [`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime)
 over bubblewrap. The repo is read-only, credential paths unreadable, opencode's own API keys
-masked, egress limited to the ladders' provider endpoints. `srt` fails closed — a bad config or
+masked, egress limited to the provider endpoints in the policy (a ★ favorite on any other provider fails there, and opencode-code-review's fallback moves to its next alternate). `srt` fails closed — a bad config or
 missing dependency is exit 1, never a silent unsandboxed run. Because the kernel confines the whole
 process tree, the coordinator HAS a shell (their Phase 0 is `git diff`) and HAS `task` (their
 Phase 1–3 spawn subagents): a subagent's write fails with `EROFS` exactly like the coordinator's.
@@ -27,7 +27,7 @@ Each aborts at runtime naming its own fix; `/opencode:setup` runs them all witho
 | Requirement | Install | Why |
 | --- | --- | --- |
 | `opencode` | `npm i -g --allow-scripts=opencode-ai opencode-ai` | the reviewer CLI (`--allow-scripts`: its postinstall fetches the platform binary) |
-| opencode-code-review | `cd ~/.config/opencode && bun add @elderengineer/opencode-code-review` (or a source copy at `~/.config/opencode/opencode-code-review/`) | the review; found by `find_plugin`, or `OPENCODE_REVIEW_PLUGIN=/path/to/plugin.ts` |
+| opencode-code-review | `"plugin": ["@elderengineer/opencode-code-review"]` in `~/.config/opencode/opencode.json` — opencode installs it into `~/.cache/opencode/packages/`, and `find_plugin` loads that same copy | the review; `OPENCODE_REVIEW_PLUGIN=/path/to/plugin.ts` for a local checkout |
 | `srt` | `npm i -g @anthropic-ai/sandbox-runtime` | the sandbox; or `OPENCODE_REVIEW_SRT=<binary or dist/cli.js>` |
 | `bwrap`, `socat` | `sudo apt install bubblewrap socat` | srt's Linux confinement and its host-proxy bridge |
 | `python3`, `node`, `flock` | distro packages | the parsers, the salvager, the single-run guard |
@@ -51,8 +51,12 @@ from the resolved config. Project lenses (`.opencode/code-review/lenses/*.md`) s
 plugin reads that directory itself, not through config (`reviewer-lens-money` was injected with
 a lens present). `~/.opencode/opencode.json` is still probed (none exists on this box); the
 harness also unsets `OPENCODE_CONFIG*` from the caller's environment. `XDG_STATE_HOME` redirects
-the state dir the same way, so the plugin's sticky `code-review-level` / `code-review-model` files
-are per run: `using <model>` cannot bind, and the user's TUI defaults are never touched.
+opencode's own state dir the same way, so the user's TUI defaults are never touched. It does NOT
+redirect opencode-code-review's: the plugin resolves `homedir()/.local/state/opencode/` directly
+(re-measured 2026-09-23, v0.5.0), so its sticky `code-review-model` pin and its favorites
+`code-review-ladder.json` bind the reviewers inside the sandbox too — the harness relies on that,
+read-only. The ladder cache is refreshed only by `/code-review` in the opencode TUI: upstream fetches
+its session's `serverUrl`, which srt's egress policy refuses from inside the sandbox.
 *Consequence:* the private config dir must be **writable** (opencode writes a `.gitignore` and
 attempts a background `@opencode-ai/plugin` install there — under the sandbox that install fails
 with a harmless `level=WARN background dependency install failed`, the plugin having resolved its
@@ -88,8 +92,8 @@ Nothing was added to the policy.
 with `Unknown agent type: <x> is not a valid agent type`; the model then follows their
 `SPAWN_FALLBACK_NOTE` (retry once, then run the lens inline). The harness reads every `task`
 spawn's `subagent_type` from the stream — live, in the watchdog, and after the run — and aborts on
-any name outside `{reviewer-<level>, reviewer-lens-*}`; a medium+ run that spawned nothing
-advances the ladder as "a single pass wearing a fan-out's label". A medium run on the M3 diff
+any name outside `{reviewer-<level>, reviewer-<level>-alt<N>, reviewer-lens-*}`; a medium+ run that
+spawned nothing aborts as "a single pass wearing a fan-out's label". A medium run on the M3 diff
 spawned 12 × `reviewer-medium`, all inheriting the coordinator's `--model`.
 
 **M6 — `--variant max` on the coordinator composes with the plugin's `variant: max` pin on

@@ -17,7 +17,7 @@ Facts:
   PROMPT_CALLED PROMPT_OK CELL_LEVEL the code_review_prompt tool call: made, completed, and the
                                      effort tag of the cell it compiled (`<level> effort → …`).
   SPAWNS SPAWN_NAMES BAD_SPAWNS      every `task` call, its subagent_type, and those outside the
-  SPAWN_ERRORS                       allow-set {reviewer-<level>, reviewer-lens-*}.
+  SPAWN_ERRORS                       allow-set {reviewer-<level>, reviewer-<level>-alt<N>, reviewer-lens-*}.
   SUB_SESSIONS SUB_STEPS SUB_IN_TOK  step_finish events whose sessionID is not the parent's —
   SUB_OUT_TOK SUB_COST               present only if opencode forwards subagent steps to the
                                      parent stream (measurement M2). Zero with SPAWNS>0 means
@@ -43,7 +43,7 @@ def main(argv):
     level = argv[argv.index("--level") + 1] if "--level" in argv else ""
     final = argv[argv.index("--final") + 1] if "--final" in argv else None
     errors_path = argv[argv.index("--errors") + 1] if "--errors" in argv else None
-    allow = re.compile(rf"^(reviewer-{re.escape(level)}|reviewer-lens-[A-Za-z0-9_.-]+)$") if level else None
+    allow = re.compile(rf"^(reviewer-{re.escape(level)}(-alt[0-9]+)?|reviewer-lens-[A-Za-z0-9_.-]+)$") if level else None
 
     parent = None
     order, parts = [], {}

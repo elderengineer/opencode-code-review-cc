@@ -285,7 +285,9 @@ check "level and target are SEPARATE argv tokens (opencode quotes tokens with sp
   "$([ "$(sed -n 1p "$FAKE_ARGS")" = "low" ] && [ "$(sed -n 2p "$FAKE_ARGS")" = "$(git rev-parse --short master)...HEAD" ] && echo 0 || echo 1)"
 check "every opencode ran under a private XDG_CONFIG_HOME and XDG_STATE_HOME, with OPENCODE_CONFIG unset" \
   "$(grep '^env' "$FAKE_LOG" | grep -qvE $'^env\t/.*\t/.*\tunset$' && echo 1 || echo 0)"
-check "the ladder for low starts with the breadth flash" "$(grep -m1 '^probe' "$FAKE_LOG" | grep -q 'deepseek-v4-flash' && echo 0 || echo 1)"
+check "with no upstream pin the coordinator gets NO --model (opencode's default)" "$([ "$(grep -m1 '^probe' "$FAKE_LOG")" = $'probe\t' ] && echo 0 || echo 1)"
+check "  … and says so" "$(have "$ERR" "opencode's default" && echo 0 || echo 1)"
+check "  … and the absent pin file is not announced on stderr" "$(grep -q 'code-review-model' "$ERR" && echo 1 || echo 0)"
 check "accounting names the plugin version and the level" "$( { have "$ERR" 'run accounting' && have "$ERR" '9.9.9-fake' && have "$ERR" 'level            low'; } && echo 0 || echo 1)"
 check "  … and says subagents: 0 for a low run" "$(grep -q 'subagents        0 ' "$ERR" && echo 0 || echo 1)"
 
@@ -355,7 +357,6 @@ check "medium review succeeds" $rc
 F="$(promoted)"
 check "the JSON contract was extracted from inside a fenced block with prose before it" \
   "$(python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); sys.exit(0 if len(f)==2 and f[0]["verdict"]=="CONFIRMED" and "verdict" not in f[1] else 1)' "$F" && echo 0 || echo 1)"
-check "the ladder for medium starts with the deep pro" "$(grep -m1 '^probe' "$FAKE_LOG" | grep -q 'deepseek-v4-pro' && echo 0 || echo 1)"
 check "accounting names the spawn count and agent" "$(grep -q 'subagents        12 spawned (reviewer-medium)' "$ERR" && echo 0 || echo 1)"
 check "  … with the fan-out's tokens read from the session store (12 × 10000)" "$(grep -q '120000 in across 24 steps' "$ERR" && echo 0 || echo 1)"
 LED="$STATE/ledger.tsv"
@@ -385,28 +386,63 @@ check "a project-lens specialist (reviewer-lens-*) is in the allow-set" $rc
 reset_state
 FAKE_SPAWN_NAME=reviewer-high run medium; rc=$?
 check "the wrong level's reviewer is NOT (reviewer-high at medium)" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
+reset_state
+FAKE_SPAWN_NAME=reviewer-medium-alt2 run medium; rc=$?
+check "an auto-ladder alternate (reviewer-medium-alt2) is in the allow-set" $rc
+reset_state
+FAKE_SPAWN_NAME=reviewer-high-alt1 run medium; rc=$?
+check "  … but not another level's alternate (reviewer-high-alt1 at medium)" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
+
+echo "== models are opencode-code-review's decision =="
+UP="$HOME/.local/state/opencode"; mkdir -p "$UP"
+reset_state; : >"$FAKE_LOG"
+echo auto >"$UP/code-review-model"
+printf '{"cachedAt":1,"ladder":[{"route":{"providerID":"opencode-go","modelID":"muse-fake"},"effective":0.1,"pot":false},{"route":{"providerID":"zai","modelID":"glm-fake"},"effective":0.2,"pot":true}]}' >"$UP/code-review-ladder.json"
+run medium; rc=$?
+check "with the auto pin the coordinator runs the head of upstream's cached ladder" \
+  "$([ $rc -eq 0 ] && grep -qxF $'run\topencode-go/muse-fake\tcode-review' "$FAKE_LOG" && have "$ERR" 'favorites ladder' && echo 0 || echo 1)"
+check "  … which the sandbox may read but never write" \
+  "$(python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["filesystem"]["allowWrite"]; sys.exit(1 if any(sys.argv[2].startswith(x.rstrip("/")) for x in w) else 0)' "$(dirname "$(promoted)")/sandbox.json" "$UP/code-review-ladder.json" && echo 0 || echo 1)"
+reset_state; : >"$FAKE_LOG"
+rm -f "$UP/code-review-ladder.json"
+run medium; rc=$?
+check "auto with no cached ladder runs on opencode's default, says how to build it, writes nothing" \
+  "$([ $rc -eq 0 ] && grep -qxF $'run\t\tcode-review' "$FAKE_LOG" && [ ! -e "$UP/code-review-ladder.json" ] && have "$ERR" 'run /code-review once in the opencode TUI' && echo 0 || echo 1)"
+reset_state; : >"$FAKE_LOG"
+echo zai-coding-plan/glm-fake >"$UP/code-review-model"
+run medium; rc=$?
+check "a concrete sticky pin is the coordinator's model too" "$([ $rc -eq 0 ] && grep -qxF $'run\tzai-coding-plan/glm-fake\tcode-review' "$FAKE_LOG" && echo 0 || echo 1)"
+reset_state; : >"$FAKE_LOG"
+run medium --model deepseek/deepseek-fake; rc=$?
+check "--model overrides it for the coordinator" "$([ $rc -eq 0 ] && grep -qxF $'run\tdeepseek/deepseek-fake\tcode-review' "$FAKE_LOG" && echo 0 || echo 1)"
+rm -f "$UP/code-review-model" "$UP/code-review-ladder.json"
+reset_state
+run medium --no-triage --lenses correctness,security --include-generated; rc=$?
+check "--no-triage, --lenses and --include-generated pass through to /code-review" \
+  "$([ $rc -eq 0 ] && grep -qx -- '--no-triage' "$FAKE_ARGS" && grep -qx -- 'correctness,security' "$FAKE_ARGS" && grep -qx -- '--include-generated' "$FAKE_ARGS" && echo 0 || echo 1)"
+run medium --lenses 'a b'; rc=$?
+check "  … and a --lenses value with a space is refused" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 
 echo "== the compiled cell must be the level asked for =="
 reset_state; : >"$FAKE_LOG"
-FAKE_CELL_LEVEL=low OPENCODE_REVIEW_MAX_ATTEMPTS=2 run medium; rc=$?
+FAKE_CELL_LEVEL=low run medium; rc=$?
 check "a medium run that compiled the low cell does not promote" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 check "  … and says which cell was compiled" "$(grep -qE "compiled cell is 'low', not 'medium'" "$ERR" && echo 0 || echo 1)"
-check "  … advancing the ladder (model-shaped: the model altered the arguments)" "$([ "$(grep -c '^run' "$FAKE_LOG")" -eq 2 ] && echo 0 || echo 1)"
+check "  … in one attempt: model fallback is upstream's, not the harness's" "$([ "$(grep -c '^run' "$FAKE_LOG")" -eq 1 ] && echo 0 || echo 1)"
 reset_state; : >"$FAKE_LOG"
-FAKE_NO_PROMPT_CALL=1 OPENCODE_REVIEW_MAX_ATTEMPTS=1 run medium; rc=$?
+FAKE_NO_PROMPT_CALL=1 run medium; rc=$?
 check "a run that never called code_review_prompt does not promote" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 check "  … saying so" "$(have "$ERR" 'never completed a code_review_prompt call' && echo 0 || echo 1)"
 reset_state
-FAKE_SPAWNS=0 OPENCODE_REVIEW_MAX_ATTEMPTS=1 run medium; rc=$?
+FAKE_SPAWNS=0 run medium; rc=$?
 check "a medium run that spawned nothing is a single pass, not promoted" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 check "  … named as the inline fallback" "$(have "$ERR" 'inline fallback' && echo 0 || echo 1)"
 
-echo "== the output gate: off-contract output advances the ladder =="
+echo "== the output gate: off-contract output aborts =="
 reset_state; : >"$FAKE_LOG"
-FAKE_TEXT='I looked and it seems fine.' OPENCODE_REVIEW_MAX_ATTEMPTS=2 run medium; rc=$?
+FAKE_TEXT='I looked and it seems fine.' run medium; rc=$?
 check "prose without a JSON array is not a review" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 check "  … reported as off-contract" "$(have "$ERR" 'off-contract' && echo 0 || echo 1)"
-check "  … and the ladder advanced" "$([ "$(grep -c '^run' "$FAKE_LOG")" -eq 2 ] && echo 0 || echo 1)"
 reset_state
 FAKE_TEXT='[]' run medium; rc=$?
 check "[] is a valid, promotable review that found nothing" $rc
@@ -418,7 +454,7 @@ reset_state
 FAKE_TEXT='[{\"file\":\"a.ts\",\"summary\":\"x\",\"failure_scenario\":\"y\",\"verdict\":\"REFUTED\"}]' run medium; rc=$?
 check "a REFUTED finding is dropped, not promoted" "$([ $rc -eq 0 ] && [ "$(cat "$(promoted)")" = "[]" ] && echo 0 || echo 1)"
 reset_state
-FAKE_REASON=length OPENCODE_REVIEW_MAX_ATTEMPTS=1 run medium; rc=$?
+FAKE_REASON=length run medium; rc=$?
 check "a 'length' stop is cut short, not finished" "$([ $rc -ne 0 ] && have "$ERR" 'cut short' && echo 0 || echo 1)"
 
 echo "== the sandbox gate is measured, and a leaky sandbox aborts the run =="
@@ -526,15 +562,15 @@ check "  … and max pins --variant max on the coordinator" "$(grep -q -- 'varia
 echo "== route preflight: nothing heavy is sent to a refused route, and it is killed early =="
 reset_state; : >"$FAKE_LOG"
 T0=$SECONDS
-FAKE_PROBE_FATAL=1 OPENCODE_REVIEW_MAX_ATTEMPTS=2 run medium; rc=$?
+FAKE_PROBE_FATAL=1 run medium; rc=$?
 T1=$((SECONDS - T0))
-check "a fatal preflight walks the ladder and then aborts" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
+check "a fatal preflight aborts" "$([ $rc -ne 0 ] && echo 0 || echo 1)"
 check "  … reporting the preflight as the reason" "$(have "$ERR" 'preflight' && echo 0 || echo 1)"
-check "  … having probed every attempt, each inside the sandbox" "$([ "$(grep -c '^probe' "$FAKE_LOG")" -eq 2 ] && echo 0 || echo 1)"
+check "  … having probed once, inside the sandbox" "$([ "$(grep -c '^probe' "$FAKE_LOG")" -eq 1 ] && echo 0 || echo 1)"
 check "  … and NEVER launched the real run" "$([ "$(grep -c '^run' "$FAKE_LOG")" -eq 0 ] && echo 0 || echo 1)"
-check "  … killing each refused probe early rather than waiting it out (took ${T1}s for two)" "$([ "$T1" -lt 25 ] && echo 0 || echo 1)"
-check "  … logging the probes to the ledger with no run row" \
-  "$(awk -F'\t' '$4=="probe" && $5 ~ /^fail/{n++} $4=="run"{r++} END{exit !(n==2 && r==0)}' "$STATE/ledger.tsv" && echo 0 || echo 1)"
+check "  … killing the refused probe early rather than waiting it out (took ${T1}s)" "$([ "$T1" -lt 15 ] && echo 0 || echo 1)"
+check "  … logging the probe to the ledger with no run row" \
+  "$(awk -F'\t' '$4=="probe" && $5 ~ /^fail/{n++} $4=="run"{r++} END{exit !(n==1 && r==0)}' "$STATE/ledger.tsv" && echo 0 || echo 1)"
 : >"$FAKE_LOG"
 FAKE_PROBE_FATAL=1 run medium --model opencode-go/deepseek-v4-flash; rc=$?
 check "a pinned model dies at the preflight, saying not to relaunch" "$([ $rc -ne 0 ] && have "$ERR" 'Do NOT relaunch' && echo 0 || echo 1)"
@@ -580,7 +616,7 @@ rm -rf .opencode/code-review
 
 echo "== a killed attempt records what it BURNED, not zeros =="
 reset_state
-FAKE_DIE_AFTER_STEPS=1 OPENCODE_REVIEW_MAX_ATTEMPTS=1 run medium; rc=$?
+FAKE_DIE_AFTER_STEPS=1 run medium; rc=$?
 check "the killed attempt still writes a run row" "$(awk -F'\t' '$4=="run"' "$STATE/ledger.tsv" | grep -q . && echo 0 || echo 1)"
 check "  … with the steps it was billed for (2), input summed (30000), output as MAX (800)" \
   "$(awk -F'\t' '$4=="run" && $9==2 && $10==30000 && $11==800' "$STATE/ledger.tsv" | grep -q . && echo 0 || echo 1)"

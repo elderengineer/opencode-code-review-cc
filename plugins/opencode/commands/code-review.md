@@ -22,7 +22,7 @@ sandboxed run's cost.
 Launch, passing the level first and then the REST of the arguments verbatim — the raw arguments with
 the level word removed, since the harness takes the level exactly once and repeating it is a usage
 error. Keep everything else (`--fix`, `--since`, `--full`, `--base`, `--model`, `--force-size`,
-`--parallel` and path targets; the script strips `--comment` and `--post` itself and refuses
+`--parallel`, `--no-triage`, `--lenses`, `--include-generated` and path targets; the script strips `--comment` and `--post` itself and refuses
 `using <model>`):
 
 ```typescript

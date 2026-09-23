@@ -6,6 +6,7 @@
 # INSIDE the process the gates distrust cannot: confinement, cost, fail-loud, and the Claude-side UX.
 #
 #   run-review.sh review <low|medium|high|max> [--since <ref>|--full] [--base <ref>] [--model <M>]
+#                        [--no-triage] [--lenses a,b,c] [--include-generated]
 #                        [--force-size] [--parallel] [--fix] [--] [<path>...]
 #   run-review.sh setup            render the policy, run the probe, report host requirements; no review
 #   run-review.sh usage            the ledger as a table, with per-level totals
@@ -14,10 +15,13 @@
 #   run-review.sh last             path of the last promoted findings file, and the head it reviewed
 #   run-review.sh assert-clean     refuse a commit that stages the harness's scratch
 #
-# Without --model the level's MODEL LADDER runs: best model for the task first, and within a model
-# the subscription pot before pay-per-token cash. A model/route-shaped failure (timeout, runaway,
-# provider error, empty or truncated stream, output off-contract) advances the ladder by itself; a
-# confinement or contract failure aborts. --model pins one entry and disables fallback.
+# MODELS are opencode-code-review's decision, not this harness's. It binds the reviewer fleet when
+# the plugin loads, from its own state under $HOME/.local/state/opencode: the sticky pin
+# `code-review-model` (set in opencode with `/code-review ... --model auto|<provider/model>`) and,
+# with `auto`, the ladder of your TUI favorites (★) it caches in `code-review-ladder.json`, whose
+# alternates (`reviewer-<level>-alt<N>`) carry its own fallback. Upstream never picks the
+# COORDINATOR's model, so the harness reads the same decision for it: --model, else the cached
+# ladder's head, else a concrete sticky pin, else opencode's default. One attempt; any failure aborts.
 #
 # CONFINEMENT. opencode has no sandbox of its own, so this harness supplies one: every invocation
 # runs under `srt` (@anthropic-ai/sandbox-runtime), which puts an OS-level boundary around the whole
@@ -34,8 +38,12 @@
 # copy of coordinator.json is the only config a sandboxed run loads — the user's other plugins, MCP
 # servers and agents never enter the session. OPENCODE_DISABLE_PROJECT_CONFIG=1 keeps the reviewed
 # repo's `.opencode/opencode.json` out too (a planted `reviewer-high: {tools: {bash: true}}` was
-# measured to vanish). XDG_STATE_HOME is per run as well, so opencode-code-review's sticky
-# `using <model>` pin cannot bind and the ladder stays the only model authority.
+# measured to vanish). XDG_STATE_HOME is per run as well — but opencode-code-review keeps its state
+# under homedir()/.local/state/opencode, NOT XDG_STATE_HOME (measured 2026-09-23, v0.5.0), so its
+# sticky model pin and favorites ladder DO bind inside the sandbox. That is the intended path: the
+# sandbox READS them and writes nothing back. Upstream refreshes the ladder cache by fetching its
+# session's serverUrl, which srt's egress policy (provider domains only, no localhost) refuses, so a
+# sandboxed run never refreshes it: /code-review in the opencode TUI does, and that is where it lives.
 #
 # COST. A review is an agentic loop that re-sends its whole context every step, and at medium and
 # above the plugin fans out to 8–10 finder subagents plus one verifier per candidate, each its own
@@ -55,77 +63,12 @@ PREFLIGHT_AGENT='opencode-review-preflight'
 PLUGIN_PKG='@elderengineer/opencode-code-review'
 STATE_DIRNAME='.opencode-review'
 
-# --- the ladders: the harness's model authority until opencode-code-review's own model selection lands ---
-# Best model for the task first; within a model, cheapest vendor first (pot before cash).
-# deepseek/* direct is pay-per-token at DeepSeek's list price: half price off-peak (peak is
-# 01:00-04:00 and 06:00-10:00 UTC Mon-Fri), so schedule direct retries in an off-peak window when
-# the clock allows. Level → ladder: low is one pass with no subagents, so a pro model is wasted and
-# breadth (flash first) runs it; medium/high need a model that can quote the line in the verify
-# pass, so deep (pro first); max is deep as well, with --variant max pinned (§7 of DESIGN.md).
-LADDER_DEEP=(
-  opencode-go/deepseek-v4-pro
-  deepseek/deepseek-v4-pro
-  opencode-go/deepseek-v4-flash
-  zai-coding-plan/glm-5.3-flash
-  opencode-go/glm-5.3-flash
-  deepseek/deepseek-v4-flash
-)
-LADDER_BREADTH=(
-  opencode-go/deepseek-v4-flash
-  zai-coding-plan/glm-5.3-flash
-  opencode-go/glm-5.3-flash
-  deepseek/deepseek-v4-flash
-  opencode-go/deepseek-v4-pro
-  deepseek/deepseek-v4-pro
-)
-# Documentation, not a gate: a name outside this set runs with a warning (the ladder's billing
-# and behaviour notes do not apply to it), and a name opencode cannot resolve dies loudly at the
-# CLI — the behaviour we want anyway.
-KNOWN_MODELS='opencode-go/deepseek-v4-pro deepseek/deepseek-v4-pro opencode-go/deepseek-v4-flash deepseek/deepseek-v4-flash zai-coding-plan/glm-5.3-flash opencode-go/glm-5.3-flash'
-
-# --- peak-aware reordering ---------------------------------------------------------------------
-# DeepSeek peak = 01:00-04:00 and 06:00-10:00 UTC Mon-Fri: cash doubles, while the GLM pot routes
-# cost the same regardless of hour. During peak, every deepseek CASH entry demotes below the GLM
-# pot entries. It does NOT promote GLM above the DeepSeek pots: agentic review requests are
-# cache-dominated and the deepseek pot route is the cheaper one at ALL hours — 2x a cheaper route
-# is still cheaper. Tier order dominates throughout.
-ds_peak() {
-  local h d
-  h=$(date -u +%H); d=$(date -u +%u)   # %u: 1=Mon ... 7=Sun
-  [ "$d" -le 5 ] || return 1           # weekends are off-peak for DeepSeek entirely
-  { [ "$h" -ge 1 ] && [ "$h" -lt 4 ]; } || { [ "$h" -ge 6 ] && [ "$h" -lt 10 ]; }
-}
-# Applied per attempt to the entries not yet tried, never once at startup: a review runs for
-# minutes, and a ladder fixed at 05:58 UTC executes off-peak order straight through the 06:00
-# peak boundary (observed 2026-09-02). Demotion is STABLE — entries keep their relative order.
-demote_peak_cash() { # <entries…> — during peak every `deepseek/` CASH entry sits below the pots
-  local m keep=() demote=()
-  ds_peak || { printf '%s\n' "$@"; return; }
-  for m in "$@"; do
-    case "$m" in
-      deepseek/*) demote+=("$m") ;;
-      *)          keep+=("$m") ;;
-    esac
-  done
-  printf '%s\n' ${keep[@]+"${keep[@]}"} ${demote[@]+"${demote[@]}"}
-}
-
-# Reasoning effort, defaulting to `max`: every model on every ladder accepts it (deepseek/* take
-# {high,max}; glm-5.3-flash takes {low,high,max}). Set OPENCODE_REVIEW_VARIANT= (empty) to send no
-# variant at all, which is what a model outside KNOWN_MODELS may need. The two FLASH models are
-# pinned to `max` regardless of the knob, and so is the `max` level: opencode-code-review pins
-# `variant: max` on reviewer-max, and the coordinator should match (M6: the two compose — the
-# coordinator's --variant is the session default the subagents inherit unless pinned).
-VARIANT="${OPENCODE_REVIEW_VARIANT-max}"
-variant_for() { # <model> <level>
-  case "$2" in max) echo max; return ;; esac
-  case "$1" in
-    */deepseek-v4-flash|*/glm-5.3-flash) echo max ;;
-    *) echo "$VARIANT" ;;
-  esac
-}
+# Reasoning effort for the coordinator session, which the reviewers inherit unless pinned. Empty by
+# default: opencode's session variant, exactly as upstream's own table says. The `max` level passes
+# `max` because upstream pins `variant: max` on reviewer-max and the coordinator should match (M6).
+VARIANT="${OPENCODE_REVIEW_VARIANT:-}"
+variant_for_level() { case "$1" in max) echo max ;; *) echo "$VARIANT" ;; esac; }
 TIMEOUT_SECS="${OPENCODE_REVIEW_TIMEOUT:-3600}"
-MAX_ATTEMPTS="${OPENCODE_REVIEW_MAX_ATTEMPTS:-6}"   # default = the longest ladder, so the advertised tail is reachable
 # Liveness watchdog (see the loop): kill a run whose event log never starts, stops growing, or
 # grows without bound, long before the timeout would. A healthy run wrote 143KB of events in its
 # first 30s; a legit mid-run thinking pause ran 210s flat. With subagents the PARENT stream is
@@ -157,29 +100,29 @@ note() { echo "opencode-review: $*" >&2; }
 usage() {
   cat >&2 <<'EOF'
 usage: run-review.sh review <low|medium|high|max> [--since <ref> | --full] [--base <ref>] [--model <M>]
+                            [--no-triage] [--lenses a,b,c] [--include-generated]
                             [--force-size] [--parallel] [--fix] [--] [<path>...]
        run-review.sh setup | usage | status | cancel | last | assert-clean
 
   review     run opencode-code-review's /code-review <level> inside the sandbox and promote its
              findings to <repo>/.opencode-review/runs/<stamp>-<level>/findings.json
-  level      low     one diff pass, hunk only, no subagents            ≤4 findings   breadth ladder
-             medium  8 finder lenses × 6 candidates, 1-vote verify      ≤8           deep ladder
-             high    same fan-out, recall-biased verify                 ≤10          deep ladder
-             max     10 lenses × 8, verify, gap sweep, --variant max    ≤15          deep ladder
+  level      low     one diff pass, hunk only, no subagents            ≤4 findings
+             medium  up to 8 finder lenses × 6 candidates, 1-vote verify ≤8
+             high    same fan-out, recall-biased verify                 ≤10
+             max     10 lenses × 8, verify, gap sweep, --variant max    ≤15
   --since    review only the DELTA `git diff <ref>...HEAD` plus the working tree. Must be an
              ancestor of HEAD. DEFAULTS to the head the last promoted review recorded when that
              head is an ancestor of HEAD (the `review high --fix` → `review high` loop reviews only
              the uncommitted fixes); pass --full to review the whole change knowingly.
   --full     the whole <base>...HEAD diff plus the working tree, even when a recorded head exists
   --base     the ref the change is measured against (default: @{upstream}, else main, else master)
-  --model    opencode's full <provider>/<model>. Pins ONE model — runs exactly that, NO
-             auto-fallback. Without it the level's ladder runs (members, cheapest vendor first
-             within a model):
-               opencode-go/deepseek-v4-pro    deepseek/deepseek-v4-pro
-               opencode-go/deepseek-v4-flash  deepseek/deepseek-v4-flash
-               zai-coding-plan/glm-5.3-flash  opencode-go/glm-5.3-flash
-             During DeepSeek peak hours (01:00-04:00, 06:00-10:00 UTC Mon-Fri) the deepseek CASH
-             entries demote below the GLM pot entries automatically.
+  --model    opencode's full <provider>/<model> for the COORDINATOR session. Without it the
+             coordinator runs the head of opencode-code-review's cached favorites ladder (or its
+             sticky pin). The REVIEWER fleet's model is always opencode-code-review's decision:
+             set it in opencode with `/code-review <level> --model auto` (★ favorites, cheapest
+             first, with fallback) or `--model <provider/model>`, and it applies here as well.
+  --no-triage, --lenses a,b,c, --include-generated
+             passed through to opencode-code-review unchanged (see its README).
   --fix      record that Phase B was requested (the bare word `fix` is accepted too). Phase A (this script) is identical with or without
              it; Phase B — applying the findings — is Claude's, host-side, with its own Edit tool
              and the normal permission prompts. Nothing inside the sandbox ever edits.
@@ -189,10 +132,10 @@ usage: run-review.sh review <low|medium|high|max> [--since <ref> | --full] [--ba
 
   Stripped, and said so in the accounting: --comment and --post (gh/glab, the network and
   ~/.config/gh are all denied). REFUSED: `using <model>` (a sticky pin that would override the
-  ladder on every later run — the ladder is the only model authority in sandboxed runs).
+  model on every later run; set it in opencode instead, where you can see it).
 
 env: OPENCODE_BIN OPENCODE_REVIEW_SRT OPENCODE_REVIEW_PLUGIN OPENCODE_REVIEW_MODEL OPENCODE_REVIEW_VARIANT
-     OPENCODE_REVIEW_TIMEOUT OPENCODE_REVIEW_MAX_ATTEMPTS OPENCODE_REVIEW_STALL_START OPENCODE_REVIEW_STALL_BYTES
+     OPENCODE_REVIEW_TIMEOUT OPENCODE_REVIEW_STALL_START OPENCODE_REVIEW_STALL_BYTES
      OPENCODE_REVIEW_MAX_JSONL_MB OPENCODE_REVIEW_MAX_DIFF_LINES OPENCODE_REVIEW_PREFLIGHT
 EOF
   exit 2
@@ -262,13 +205,16 @@ OC_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
 OC_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/opencode"
 
 # opencode-code-review must exist on this box; the harness never vendors it. In order: an explicit
-# path, the npm install into opencode's config dir (their README's recommended install), then a
-# source copy there (their "from source" install). Its package.json version is stamped on the
-# accounting so a re-measurement can name what it measured.
+# path (a local checkout), an npm install into opencode's config dir, then the copy opencode ITSELF
+# loads for `"plugin": ["@elderengineer/opencode-code-review"]` — its package cache — so a sandboxed
+# review runs the same version as /code-review in opencode and upgrades when opencode does. Its
+# package.json version is stamped on the accounting so a re-measurement can name what it measured.
 find_plugin() {
-  local cands=()
+  local cands=() pkgs="${XDG_CACHE_HOME:-$HOME/.cache}/opencode/packages/$PLUGIN_PKG"
   [ -z "${OPENCODE_REVIEW_PLUGIN:-}" ] || cands+=("$OPENCODE_REVIEW_PLUGIN")
-  cands+=("$HOME/.config/opencode/node_modules/$PLUGIN_PKG/plugin.ts" "$HOME/.config/opencode/opencode-code-review/plugin.ts")
+  cands+=("$HOME/.config/opencode/node_modules/$PLUGIN_PKG/plugin.ts"
+          "$pkgs/node_modules/$PLUGIN_PKG/plugin.ts"
+          "$pkgs@latest/node_modules/$PLUGIN_PKG/plugin.ts")
   local p
   for p in "${cands[@]}"; do
     [ -f "$p" ] && { echo "$p"; return 0; }
@@ -318,7 +264,7 @@ case "$1" in
 esac
 
 # --- argument parsing (review and setup) -------------------------------------------------------------
-LEVEL="" SINCE="" FULL=0 BASE="" FORCE_SIZE=0 PARALLEL=0 FIX=0 STRIPPED=()
+LEVEL="" SINCE="" FULL=0 BASE="" FORCE_SIZE=0 PARALLEL=0 FIX=0 STRIPPED=() PASSTHRU=()
 MODEL_ARG="${OPENCODE_REVIEW_MODEL:-}"
 PATHS=()
 while [ $# -gt 0 ]; do
@@ -332,7 +278,10 @@ while [ $# -gt 0 ]; do
     --force-size) FORCE_SIZE=1; shift ;;
     --parallel)   PARALLEL=1;   shift ;;
     --comment|--post|--no-post) STRIPPED+=("$1"); shift ;;
-    using) die "\`using <model>\` is refused: it writes a sticky pin that binds the reviewer subagents' model at the next plugin load, silently overriding the ladder on every later run. The ladder is the only model authority in sandboxed runs; pass --model <provider/model> to pin ONE run." ;;
+    --no-triage|--include-generated) PASSTHRU+=("$1"); shift ;;
+    --lenses)     [ $# -ge 2 ] || usage; [[ "$2" =~ ^[A-Za-z0-9_.,-]+$ ]] || die "--lenses takes a comma-separated list with no spaces (opencode's argv quoting would corrupt it)."
+                  PASSTHRU+=("$1" "$2"); shift 2 ;;
+    using) die "\`using <model>\` is refused here: it writes opencode-code-review's sticky pin (read-only in the sandbox anyway). Set it in opencode — \`/code-review <level> --model auto\` or \`--model <provider/model>\` — and it applies to sandboxed reviews too." ;;
     --) shift; PATHS+=("$@"); break ;;
     -*) usage ;;
     *)  PATHS+=("$1"); shift ;;
@@ -358,24 +307,36 @@ for p in ${PATHS[@]+"${PATHS[@]}"}; do
     die "target '$p' is neither a path in the tree nor one git knows — a branch goes in --base, a range in --since."
 done
 
-# The candidate list. A pinned model is a one-entry ladder with fallback disabled: an explicit
-# choice must not be second-guessed.
-PINNED=0
+# The coordinator's model. opencode-code-review picks the REVIEWERS' model at plugin load from its
+# own state (see the header); it never picks the coordinator's, so read the same decision for it.
+UPSTREAM_STATE="$HOME/.local/state/opencode"          # homedir(), as opencode-code-review resolves it
+LADDER_CACHE="$UPSTREAM_STATE/code-review-ladder.json"
+# A missing pin file is the common case (fresh box, or no pin ever set). 2>/dev/null comes BEFORE the
+# input redirection because bash applies redirections left to right: after it, the failed `<` would
+# print to stderr first. `|| true` keeps an unreadable file from killing the run under set -e.
+UPSTREAM_PIN="$(tr -d '[:space:]' 2>/dev/null <"$UPSTREAM_STATE/code-review-model" || true)"
+[ -z "$MODEL_ARG" ] || [[ "$MODEL_ARG" == */* ]] ||
+  die "--model takes opencode's full <provider>/<model>, not a short name (see: opencode models)."
+ladder_head() {
+  python3 - "$LADDER_CACHE" <<'PY' 2>/dev/null || true
+import json, sys
+r = json.load(open(sys.argv[1]))["ladder"][0]["route"]
+print(f"{r['providerID']}/{r['modelID']}")
+PY
+}
+COORD_MODEL="" COORD_SOURCE=""
 if [ -n "$MODEL_ARG" ]; then
-  PINNED=1
-  [[ "$MODEL_ARG" == */* ]] ||
-    die "--model takes opencode's full <provider>/<model>, not a short name. Try: $KNOWN_MODELS"
-  grep -qw -- "$MODEL_ARG" <<<"$KNOWN_MODELS" ||
-    note "NOTE — '$MODEL_ARG' is outside this harness's tested set; the ladder's billing and behaviour assumptions do not apply to it."
-  LADDER=("$MODEL_ARG")
+  COORD_MODEL="$MODEL_ARG" COORD_SOURCE="--model"
+elif [ "$UPSTREAM_PIN" = auto ]; then
+  COORD_MODEL="$(ladder_head)" COORD_SOURCE="head of opencode-code-review's favorites ladder"
+  [ -n "$COORD_MODEL" ] || COORD_SOURCE="opencode's default — no favorites ladder cached yet: run /code-review once in the opencode TUI (it caches $LADDER_CACHE), and sandboxed reviews follow your ★ favorites from then on"
+elif [[ "$UPSTREAM_PIN" == */* ]]; then
+  COORD_MODEL="$UPSTREAM_PIN" COORD_SOURCE="opencode-code-review's sticky pin"
 else
-  case "$LEVEL" in
-    low)             LADDER=("${LADDER_BREADTH[@]}") ;;
-    medium|high|max) LADDER=("${LADDER_DEEP[@]}") ;;
-  esac
+  COORD_SOURCE="opencode's default — opencode-code-review has no model pin (\`/code-review <level> --model auto\` in opencode routes to your ★ favorites)"
 fi
-N=${#LADDER[@]}
-[ "$N" -le "$MAX_ATTEMPTS" ] || N=$MAX_ATTEMPTS
+M="${COORD_MODEL:-opencode-default}"   # the ledger's model column
+MODEL_FLAG=(); [ -z "$COORD_MODEL" ] || MODEL_FLAG=(--model "$COORD_MODEL")
 
 # --- host requirements: each aborts naming its own fix ---------------------------------------------
 REQ_FAIL=0
@@ -726,6 +687,7 @@ sandbox_gate
 
 if [ "$MODE" = "setup" ]; then
   note "setup OK — opencode $("$OPENCODE_BIN" --version 2>/dev/null | tail -1), opencode-code-review v$(plugin_version "$PLUGIN") at $PLUGIN, srt ${SRT[*]}. No review was run. Policy rendered at $POLICY."
+  note "models — coordinator: $M ($COORD_SOURCE); reviewers: opencode-code-review's pin ${UPSTREAM_PIN:-(none)}${UPSTREAM_PIN:+ in $UPSTREAM_STATE/code-review-model}"
   exit 0
 fi
 
@@ -747,11 +709,11 @@ HEAD_BEFORE="$(git rev-parse HEAD)"
 # any token containing a space in double quotes, and the plugin's parser then reads `"medium` as a
 # non-level and falls back to the sticky level (measured — it compiled the low cell).
 TARGET="$SINCE_SHA...HEAD"
-CMD_ARGS=("$LEVEL" "$TARGET")
+CMD_ARGS=("$LEVEL" "$TARGET" ${PASSTHRU[@]+"${PASSTHRU[@]}"})
 [ "${#PATHS[@]}" -eq 0 ] || CMD_ARGS+=(-- "${PATHS[@]}")
 [ "${#STRIPPED[@]}" -eq 0 ] || note "NOTE — stripped ${STRIPPED[*]}: posting needs gh/glab, the network and ~/.config/gh, all denied in the sandbox. Post host-side afterwards if wanted."
 
-# --- the ladder ---------------------------------------------------------------------------------
+# --- the run ------------------------------------------------------------------------------------
 # `setsid --wait` puts opencode in its OWN session and process group (still propagating the exit
 # code), so a supervising harness reaping background shells by process group, a terminal hangup, or
 # a CI teardown cannot kill a review that is minutes from finishing and already billed.
@@ -875,7 +837,7 @@ preflight() { # <model> — rc 0 = the route answered; rc 1 = advance, with PF_R
   set +e
   ${SETSID[@]+"${SETSID[@]}"} timeout "$PREFLIGHT_SECS" "${OC_ENV[@]}" "${SRT[@]}" -s "$POLICY" -- \
     "$OPENCODE_BIN" run --dir "$ROOT" --agent "$PREFLIGHT_AGENT" --print-logs --log-level ERROR \
-      --model "$1" --format json -- "Reply with exactly: OK" >"$raw" 2>"$err" </dev/null &
+      ${MODEL_FLAG[@]+"${MODEL_FLAG[@]}"} --format json -- "Reply with exactly: OK" >"$raw" 2>"$err" </dev/null &
   CHILD=$!
   while kill -0 "$CHILD" 2>/dev/null; do
     sleep 2
@@ -937,13 +899,8 @@ PY
 }
 
 TOTAL_COST="0.0000"
-ATTEMPTS=()
-REMAINING=("${LADDER[@]:0:$N}")
-i=0
-while [ "${#REMAINING[@]}" -gt 0 ]; do
-  mapfile -t REMAINING < <(demote_peak_cash "${REMAINING[@]}")
-  M="${REMAINING[0]}"
-  REMAINING=("${REMAINING[@]:1}")
+N=1 i=0
+while [ "$i" -lt "$N" ]; do   # one attempt: model fallback is opencode-code-review's, via its alternates
   i=$((i + 1))
   PARTIAL="$(mktemp "$RUN_DIR/attempt-$i.partial.XXXXXX")"
   RAW="$PARTIAL.jsonl"
@@ -952,37 +909,33 @@ while [ "${#REMAINING[@]}" -gt 0 ]; do
   RUN_STEPS=0 RUN_IN=0 RUN_OUT=0 RUN_LAUNCHED=0 RUN_SESSION="" SPAWNS=0 SUB_MEASURED=0
   EV_COST=0 EV_REASON="" EV_ERRORS=0 EV_TEXT=0 EV_PROMPT_CALLED=0 EV_PROMPT_OK=0 EV_CELL="" EV_SPAWN_NAMES="" EV_BAD_SPAWNS="" EV_SPAWN_ERRORS=0
 
-  # advance: give up on THIS entry, fall to the next — unless the model was pinned.
-  advance() { # <cost> <reason>
+  # advance: the attempt failed. There is no harness ladder to fall to — fallback between models is
+  # opencode-code-review's (reviewer-<level>-alt<N>) — so account for what it cost and abort.
+  advance() { # <cost> <reason> [event-log] [stderr-log] — account for what it cost, then abort
     add_cost "$1"
-    local wd; wd="$(cat "$WD_REASON" 2>/dev/null || true)"
+    local wd hint="" raw="${3:-$RAW}" errf="${4:-$PARTIAL_ERR}"
+    wd="$(cat "$WD_REASON" 2>/dev/null || true)"
     if [ "$RUN_LAUNCHED" -eq 1 ]; then
       read_subagents
       # shellcheck disable=SC2046
-      ledger run "$M" "${wd:-$2}" "$(wc -c <"$RAW" 2>/dev/null || echo 0)" "$RUN_STEPS" "$RUN_IN" "$RUN_OUT" "${1:-0}" $(sub_cols)
+      ledger run "$M" "${wd:-$2}" "$(wc -c <"$raw" 2>/dev/null || echo 0)" "$RUN_STEPS" "$RUN_IN" "$RUN_OUT" "${1:-0}" $(sub_cols)
       print_accounting "$M" "failed — ${wd:-$2}" "${1:-0}"
     fi
-    if [ "$PINNED" -eq 1 ]; then
-      local hint=""
-      case "${wd:-$2}" in
-        *"event log still empty"*|*"provider refused before producing"*|*"preflight"*)
-          hint=$'\nDo NOT relaunch until the route is verified: a refused or unreachable route bills a full context load per attempt and returns nothing. Read the ledger first:  run-review.sh usage' ;;
-      esac
-      die "--model $M was pinned: NO auto-fallback. Reason: ${wd:+watchdog — }${wd:-$2}. Event log: $RAW  stderr: $PARTIAL_ERR$hint"
-    fi
-    note "[$i/$N] $M failed — $2${wd:+ — watchdog: $wd} — falling back"
-    ATTEMPTS+=("$M: $2${wd:+ — watchdog: $wd}  [kept: $PARTIAL, $RAW, $PARTIAL_ERR]")
-    return 0
+    case "${wd:-$2}" in
+      *"event log still empty"*|*"provider refused before producing"*|*"preflight"*)
+        hint=$'\nDo NOT relaunch until the route is verified: a refused or unreachable route bills a full context load per attempt and returns nothing. Read the ledger first:  run-review.sh usage' ;;
+    esac
+    die "the review failed on $M (coordinator model from $COORD_SOURCE). Reason: ${wd:+watchdog — }${wd:-$2}. Total spend \$$TOTAL_COST. Event log: $raw  stderr: $errf. Pass --model <provider/model> to run the coordinator elsewhere.$hint"
   }
 
   if ! preflight "$M"; then
-    advance "" "preflight: $PF_REASON"
-    continue
+    # A failed preflight wrote its own probe log, not the run's ($RAW / $PARTIAL_ERR), so name those.
+    advance "" "preflight: $PF_REASON" "$PARTIAL.preflight.jsonl" "$PARTIAL.preflight.err"
   fi
 
-  V="$(variant_for "$M" "$LEVEL")"
-  note "[$i/$N] model $M${V:+, variant $V}, level $LEVEL, target $TARGET (timeout ${TIMEOUT_SECS}s)"
-  ARGS=(run --command code-review --dir "$ROOT" --agent "$AGENT" --model "$M" --print-logs --log-level INFO)
+  V="$(variant_for_level "$LEVEL")"
+  note "coordinator model $M ($COORD_SOURCE)${V:+, variant $V}, level $LEVEL, target $TARGET (timeout ${TIMEOUT_SECS}s); reviewer models are opencode-code-review's"
+  ARGS=(run --command code-review --dir "$ROOT" --agent "$AGENT" ${MODEL_FLAG[@]+"${MODEL_FLAG[@]}"} --print-logs --log-level INFO)
   [ -z "$V" ] || ARGS+=(--variant "$V")
   ARGS+=(--format json -- "${CMD_ARGS[@]}")
 
@@ -1054,14 +1007,13 @@ while [ "${#REMAINING[@]}" -gt 0 ]; do
     # shellcheck disable=SC2046
     ledger run "$M" "bad-spawn" "$(wc -c <"$RAW" 2>/dev/null || echo 0)" "$RUN_STEPS" "$RUN_IN" "$RUN_OUT" "$EV_COST" $(sub_cols)
     print_accounting "$M" "void — task spawned an agent outside the allow-set: ${EV_BAD_SPAWNS:-see watchdog}" "$EV_COST"
-    die "the coordinator spawned '${EV_BAD_SPAWNS:-?}' through task; only reviewer-$LEVEL and reviewer-lens-* are permitted. The review is void. Event log: $RAW"
+    die "the coordinator spawned '${EV_BAD_SPAWNS:-?}' through task; only reviewer-$LEVEL, its auto-ladder alternates reviewer-$LEVEL-alt<N>, and reviewer-lens-* are permitted. The review is void. Event log: $RAW"
   fi
   grep -qE 'permission requested:.*auto-rejecting' "$PARTIAL_ERR" 2>/dev/null &&
     note "NOTE — opencode auto-rejected a permission request during the run ($(grep -m1 -oE 'permission requested: [^;]*' "$PARTIAL_ERR")); the model asked for something the private config denies. Not fatal."
 
   if [ "$rc" -eq 124 ]; then
     advance "$EV_COST" "timed out after ${TIMEOUT_SECS}s (event log $RAW: $(wc -c < "$RAW") bytes — empty means it never started)"
-    continue
   fi
 
   if [ "$rc" -ne 0 ]; then
@@ -1094,30 +1046,29 @@ while [ "${#REMAINING[@]}" -gt 0 ]; do
       echo "HINT: nothing to salvage — the model had not finished a schema-valid findings list." >&2
     fi
     advance "$EV_COST" "opencode exited $rc with nothing to salvage"
-    continue
   fi
 
   # --- the contract gates: their prompt was executed, their fleet ran, their output validates ------
   if [ "${EV_ERRORS:-0}" != "0" ]; then
-    advance "$EV_COST" "the provider returned an error instead of a review ($(head -1 "$PARTIAL.errors" 2>/dev/null || echo 'unknown'))"; continue
+    advance "$EV_COST" "the provider returned an error instead of a review ($(head -1 "$PARTIAL.errors" 2>/dev/null || echo 'unknown'))"
   fi
   if [ "${EV_TEXT:-0}" != "1" ]; then
-    advance "$EV_COST" "runaway: no assistant text (stop reason ${EV_REASON:-?}) — the ladder's next model gets a fresh shot"; continue
+    advance "$EV_COST" "runaway: no assistant text (stop reason ${EV_REASON:-?}) "
   fi
   if [ "${EV_PROMPT_OK:-0}" != "1" ]; then
-    advance "$EV_COST" "the model never completed a code_review_prompt call (called: ${EV_PROMPT_CALLED:-0}) — it reviewed without the compiled prompt, which is not the review that was asked for"; continue
+    advance "$EV_COST" "the model never completed a code_review_prompt call (called: ${EV_PROMPT_CALLED:-0}) — it reviewed without the compiled prompt, which is not the review that was asked for"
   fi
   if [ "$EV_CELL" != "$LEVEL" ]; then
-    advance "$EV_COST" "the compiled cell is '${EV_CELL:-?}', not '$LEVEL' — the model altered the arguments it passed to code_review_prompt"; continue
+    advance "$EV_COST" "the compiled cell is '${EV_CELL:-?}', not '$LEVEL' — the model altered the arguments it passed to code_review_prompt"
   fi
   if [ "$LEVEL" != "low" ] && [ "${SPAWNS:-0}" -eq 0 ]; then
-    advance "$EV_COST" "no finder subagent was spawned at $LEVEL: the model took the inline fallback although task was available, which is a single pass wearing a fan-out's label"; continue
+    advance "$EV_COST" "no finder subagent was spawned at $LEVEL: the model took the inline fallback although task was available, which is a single pass wearing a fan-out's label"
   fi
   if [ "$EV_REASON" != "stop" ]; then
-    advance "$EV_COST" "stopped with '$EV_REASON', not 'stop' — cut short, not finished ($(wc -c <"$PARTIAL" 2>/dev/null || echo 0) bytes recovered)"; continue
+    advance "$EV_COST" "stopped with '$EV_REASON', not 'stop' — cut short, not finished ($(wc -c <"$PARTIAL" 2>/dev/null || echo 0) bytes recovered)"
   fi
   if ! python3 "$SKILL_DIR/findings.py" "$LEVEL" "$PARTIAL" "$PARTIAL.json" --cap "$(cap_for "$LEVEL")" >"$PARTIAL.count" 2>"$PARTIAL.gate"; then
-    advance "$EV_COST" "output off-contract: $(head -1 "$PARTIAL.gate" 2>/dev/null || echo 'not a findings list')"; continue
+    advance "$EV_COST" "output off-contract: $(head -1 "$PARTIAL.gate" 2>/dev/null || echo 'not a findings list')"
   fi
   grep -i 'NOTE' "$PARTIAL.gate" >&2 2>/dev/null || true
   COUNT="$(cat "$PARTIAL.count")"
@@ -1146,11 +1097,4 @@ while [ "${#REMAINING[@]}" -gt 0 ]; do
   exit 0
 done
 
-{
-  echo "ABORT: every model on the $LEVEL ladder failed ($i attempt(s)):"
-  for a in "${ATTEMPTS[@]}"; do echo "  - $a"; done
-  echo "Total spend: \$$TOTAL_COST. Fix the route, raise OPENCODE_REVIEW_MAX_ATTEMPTS, or pin a known-good --model."
-  echo "Read what these attempts consumed BEFORE relaunching — a blind re-run re-bills from the top:"
-  echo "  $SKILL_DIR/run-review.sh usage"
-} >&2
-exit 1
+exit 1   # unreachable: every attempt promotes (exit 0) or aborts in advance(); a fall-through is a bug
