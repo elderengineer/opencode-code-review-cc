@@ -35,8 +35,12 @@ here, on the host:
   small probe checks all of this inside the sandbox; if any check fails the run does not start.
 - **Config isolation.** Each run gets its own `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, so only
   opencode-code-review is loaded. Your other opencode plugins, MCP servers and agents are not part
-  of the session, the reviewed repository's `.opencode/opencode.json` is ignored, and the plugin's
-  sticky `using <model>` pin cannot take effect.
+  of the session, and the reviewed repository's `.opencode/opencode.json` is ignored.
+- **Models are opencode-code-review's.** The harness has no model list of its own. The reviewers
+  run whatever the plugin chose in opencode — `/code-review <level> --model auto` routes them to the
+  cheapest of your ★ favorites with fallback — and the coordinator runs the head of that same
+  cached ladder (or the plugin's pinned model; `--model` overrides it for one run). The plugin
+  itself is the copy opencode loads, from its package cache, so both run the same version.
 - **Cost.** A small probe checks the model route before the full run, a second review only covers
   what changed since the previous one, large diffs are warned about or refused, one run at a time
   per repository, and every attempt is written to a ledger that includes the subagents' tokens
